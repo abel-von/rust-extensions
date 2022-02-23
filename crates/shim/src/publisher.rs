@@ -29,6 +29,7 @@ use protobuf::well_known_types::{Any, Timestamp};
 use protobuf::Message;
 
 use crate::error::Result;
+use crate::util::{any, connect, timestamp};
 
 /// Remote publisher connects to containerd's TTRPC endpoint to publish events from shim.
 pub struct RemotePublisher {
@@ -48,37 +49,7 @@ impl RemotePublisher {
     }
 
     fn connect(address: impl AsRef<str>) -> Result<Client> {
-        use nix::sys::socket::*;
-        use nix::unistd::close;
-
-        let unix_addr = UnixAddr::new(address.as_ref())?;
-        let sock_addr = SockAddr::Unix(unix_addr);
-
-        // SOCK_CLOEXEC flag is Linux specific
-        #[cfg(target_os = "linux")]
-        const SOCK_CLOEXEC: SockFlag = SockFlag::SOCK_CLOEXEC;
-
-        #[cfg(not(target_os = "linux"))]
-        const SOCK_CLOEXEC: SockFlag = SockFlag::empty();
-
-        let fd = socket(AddressFamily::Unix, SockType::Stream, SOCK_CLOEXEC, None)?;
-
-        // MacOS doesn't support atomic creation of a socket descriptor with `SOCK_CLOEXEC` flag,
-        // so there is a chance of leak if fork + exec happens in between of these calls.
-        #[cfg(not(target_os = "linux"))]
-        {
-            use nix::fcntl::{fcntl, FcntlArg, FdFlag};
-            fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(|e| {
-                let _ = close(fd);
-                e
-            })?;
-        }
-
-        connect(fd, &sock_addr).map_err(|e| {
-            let _ = close(fd);
-            e
-        })?;
-
+        let fd = connect(address)?;
         // Client::new() takes ownership of the RawFd.
         Ok(Client::new(fd))
     }
@@ -96,8 +67,8 @@ impl RemotePublisher {
         let mut envelope = events::Envelope::new();
         envelope.set_topic(topic.to_owned());
         envelope.set_namespace(namespace.to_owned());
-        envelope.set_timestamp(Self::timestamp()?);
-        envelope.set_event(Self::any(event)?);
+        envelope.set_timestamp(timestamp()?);
+        envelope.set_event(any(event)?);
 
         let mut req = events::ForwardRequest::new();
         req.set_envelope(envelope);
@@ -105,24 +76,6 @@ impl RemotePublisher {
         self.client.forward(ctx, &req)?;
 
         Ok(())
-    }
-
-    fn timestamp() -> Result<Timestamp> {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH)?;
-
-        let mut ts = Timestamp::default();
-        ts.set_seconds(now.as_secs() as _);
-        ts.set_nanos(now.subsec_nanos() as _);
-
-        Ok(ts)
-    }
-
-    fn any(event: impl Message) -> Result<Any> {
-        let data = event.write_to_bytes()?;
-        let mut any = Any::new();
-        any.merge_from_bytes(&data)?;
-
-        Ok(any)
     }
 }
 
@@ -158,7 +111,7 @@ mod tests {
 
     #[test]
     fn test_timestamp() {
-        let ts = RemotePublisher::timestamp().unwrap();
+        let ts = timestamp().unwrap();
         assert!(ts.seconds > 0);
     }
 
