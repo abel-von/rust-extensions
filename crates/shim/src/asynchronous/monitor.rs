@@ -14,8 +14,8 @@
    limitations under the License.
 */
 
-use std::collections::HashMap;
 use futures::{StreamExt, TryFutureExt};
+use std::collections::HashMap;
 
 use lazy_static::lazy_static;
 use log::{error, warn};
@@ -23,8 +23,8 @@ use tokio::runtime::Handle;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::Mutex;
 
-use crate::error::Result;
 use crate::error::Error;
+use crate::error::Result;
 use crate::monitor::{ExitEvent, Subject, Topic};
 
 lazy_static! {
@@ -105,9 +105,15 @@ impl Monitor {
     async fn notify_topic(&self, topic: &Topic, subject: &Subject, exit_code: i32) {
         let mut results = Vec::new();
         if let Some(subs) = self.topic_subs.get(topic) {
-            while let Some(sub) = subs.iter().filter_map(|x| {self.subscribers.get(x)}).next() {
-                let res = sub.tx.send(ExitEvent{subject:subject.clone(), exit_code})
-                    .await.map_err(other_error!(e, "failed to send exit code"));
+            while let Some(sub) = subs.iter().filter_map(|x| self.subscribers.get(x)).next() {
+                let res = sub
+                    .tx
+                    .send(ExitEvent {
+                        subject: subject.clone(),
+                        exit_code,
+                    })
+                    .await
+                    .map_err(other_error!(e, "failed to send exit code"));
                 results.push(res);
             }
         }

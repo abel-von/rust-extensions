@@ -1,35 +1,38 @@
 #![cfg(feature = "async")]
 
-use std::{env, process};
+use containerd_shim_protos::shim_async::{create_task, Client, Task};
 use std::os::unix::fs::FileTypeExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
+use std::process::Command;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::process::Command;
-use containerd_shim_protos::shim_async::{Client, create_task, Task};
+use std::{env, process};
 
+use crate::asynchronous::monitor::monitor_notify_by_pid;
+use crate::asynchronous::publisher::RemotePublisher;
+use crate::asynchronous::utils::{asyncify, read_file_to_str, write_str_to_file};
+use crate::error::Error;
+use crate::error::Result;
+use crate::{
+    args, logger, parse_sockaddr, reap, setup_signals, socket_address, Config, StartOpts,
+    SOCKET_FD, TTRPC_ADDRESS,
+};
 use async_trait::async_trait;
 use command_fds::{CommandFdExt, FdMapping};
+use containerd_shim_protos::api::DeleteResponse;
+use containerd_shim_protos::protobuf::Message;
+use containerd_shim_protos::ttrpc::r#async::Server;
 use futures::StreamExt;
 use libc::{c_int, pid_t, SIGCHLD, SIGINT, SIGPIPE, SIGTERM};
 use log::{debug, error, info, warn};
 use signal_hook_tokio::Signals;
 use tokio::io::AsyncWriteExt;
-use containerd_shim_protos::api::DeleteResponse;
-use containerd_shim_protos::protobuf::Message;
-use containerd_shim_protos::ttrpc::r#async::Server;
-use crate::asynchronous::publisher::RemotePublisher;
-use crate::{args, Config, logger, parse_sockaddr, reap, setup_signals, socket_address, SOCKET_FD, StartOpts, TTRPC_ADDRESS};
-use crate::asynchronous::monitor::monitor_notify_by_pid;
-use crate::asynchronous::utils::{asyncify, read_file_to_str, write_str_to_file};
-use crate::error::Result;
-use crate::error::Error;
 
+mod monitor;
 mod publisher;
 mod utils;
-mod monitor;
 
 /// Asynchronous Main shim interface that must be implemented by all async shims.
 ///
@@ -76,8 +79,8 @@ pub trait Shim {
 
 /// Async Shim entry point that must be invoked from tokio `main`.
 pub async fn run<T>(runtime_id: &str, opts: Option<Config>)
-    where
-        T: Shim + Send + Sync + 'static,
+where
+    T: Shim + Send + Sync + 'static,
 {
     if let Some(err) = bootstrap::<T>(runtime_id, opts).await.err() {
         eprintln!("{}: {:?}", runtime_id, err);
@@ -86,8 +89,8 @@ pub async fn run<T>(runtime_id: &str, opts: Option<Config>)
 }
 
 async fn bootstrap<T>(runtime_id: &str, opts: Option<Config>) -> Result<()>
-    where
-        T: Shim + Send + Sync + 'static,
+where
+    T: Shim + Send + Sync + 'static,
 {
     // Parse command line
     let os_args: Vec<_> = env::args_os().collect();
@@ -112,7 +115,8 @@ async fn bootstrap<T>(runtime_id: &str, opts: Option<Config>) -> Result<()>
         &flags.namespace,
         publisher,
         &mut config,
-    ).await;
+    )
+    .await;
 
     match flags.action.as_str() {
         "start" => {
@@ -135,10 +139,15 @@ async fn bootstrap<T>(runtime_id: &str, opts: Option<Config>) -> Result<()>
             Ok(())
         }
         "delete" => {
-            tokio::spawn(async move { handle_signals(signals).await; });
+            tokio::spawn(async move {
+                handle_signals(signals).await;
+            });
             let response = shim.delete_shim().await?;
             let resp_bytes = response.write_to_bytes()?;
-            tokio::io::stdout().write_all(resp_bytes.as_slice()).await.map_err(io_error!(e, "failed to write response"))?;
+            tokio::io::stdout()
+                .write_all(resp_bytes.as_slice())
+                .await
+                .map_err(io_error!(e, "failed to write response"))?;
 
             Ok(())
         }
@@ -154,7 +163,9 @@ async fn bootstrap<T>(runtime_id: &str, opts: Option<Config>) -> Result<()>
             server.start().await?;
 
             info!("Shim successfully started, waiting for exit signal...");
-            tokio::spawn(async move { handle_signals(signals).await; });
+            tokio::spawn(async move {
+                handle_signals(signals).await;
+            });
             shim.wait().await;
 
             info!("Shutting down shim instance");
@@ -170,7 +181,6 @@ async fn bootstrap<T>(runtime_id: &str, opts: Option<Config>) -> Result<()>
     }
 }
 
-
 /// Spawn is a helper func to launch shim process asynchronously.
 /// Typically this expected to be called from `StartShim`.
 pub async fn spawn(opts: StartOpts, grouping: &str, vars: Vec<(&str, &str)>) -> Result<String> {
@@ -183,7 +193,11 @@ pub async fn spawn(opts: StartOpts, grouping: &str, vars: Vec<(&str, &str)>) -> 
     let listener = match start_listener(&address).await {
         Ok(l) => l,
         Err(e) => {
-            if let Error::IoError { context: ref c, err: ref io_err } = e {
+            if let Error::IoError {
+                context: ref c,
+                err: ref io_err,
+            } = e
+            {
                 if io_err.kind() != std::io::ErrorKind::AddrInUse {
                     return Err(e);
                 };
@@ -235,12 +249,11 @@ pub async fn spawn(opts: StartOpts, grouping: &str, vars: Vec<(&str, &str)>) -> 
 }
 
 fn setup_signals_tokio(config: &Config) -> Signals {
-    let signals =
-        if config.no_reaper {
-            Signals::new(&[SIGTERM, SIGINT, SIGPIPE]).expect("new signal failed")
-        } else {
-            Signals::new(&[SIGTERM, SIGINT, SIGPIPE, SIGCHLD]).expect("new signal failed")
-        };
+    let signals = if config.no_reaper {
+        Signals::new(&[SIGTERM, SIGINT, SIGPIPE]).expect("new signal failed")
+    } else {
+        Signals::new(&[SIGTERM, SIGINT, SIGPIPE, SIGCHLD]).expect("new signal failed")
+    };
     signals
 }
 
@@ -257,12 +270,16 @@ async fn handle_signals(signals: Signals) {
                 let options: c_int = libc::WNOHANG;
                 let res_pid = asyncify(move || -> Result<pid_t> {
                     Ok(unsafe { libc::waitpid(-1, &mut status, options) })
-                }).await.unwrap_or(-1);
+                })
+                .await
+                .unwrap_or(-1);
                 let status = unsafe { libc::WEXITSTATUS(status) };
                 if res_pid > 0 {
-                    monitor_notify_by_pid(res_pid, status).await.unwrap_or_else(|e| {
-                        error!("failed to send pid exit event {}", e);
-                    })
+                    monitor_notify_by_pid(res_pid, status)
+                        .await
+                        .unwrap_or_else(|e| {
+                            error!("failed to send pid exit event {}", e);
+                        })
                 }
             }
             _ => {}
@@ -271,14 +288,20 @@ async fn handle_signals(signals: Signals) {
 }
 
 async fn remove_socket_silently(address: &str) {
-    remove_socket(address).await.unwrap_or_else(|e| warn!("failed to remove socket: {}", e))
+    remove_socket(address)
+        .await
+        .unwrap_or_else(|e| warn!("failed to remove socket: {}", e))
 }
 
 async fn remove_socket(address: &str) -> Result<()> {
     let path = parse_sockaddr(address);
     if let Ok(md) = Path::new(path).metadata() {
         if md.file_type().is_socket() {
-            tokio::fs::remove_file(path).await.map_err(io_error!(e, "failed to remove socket {}", address))?;
+            tokio::fs::remove_file(path).await.map_err(io_error!(
+                e,
+                "failed to remove socket {}",
+                address
+            ))?;
         }
     }
     Ok(())
@@ -287,10 +310,12 @@ async fn remove_socket(address: &str) -> Result<()> {
 async fn start_listener(address: &str) -> Result<UnixListener> {
     let addr = address.to_string();
     asyncify(move || -> Result<UnixListener> {
-        crate::start_listener(&addr).map_err(|e| {
-            Error::IoError { context: format!("failed to start listener {}", addr), err: e }
+        crate::start_listener(&addr).map_err(|e| Error::IoError {
+            context: format!("failed to start listener {}", addr),
+            err: e,
         })
-    }).await
+    })
+    .await
 }
 
 async fn wait_socket_working(address: &str, interval_in_ms: u64, count: u32) -> Result<()> {

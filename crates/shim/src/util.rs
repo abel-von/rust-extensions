@@ -23,9 +23,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::warn;
 
-use serde::{Deserialize, Serialize};
-use containerd_shim_protos::protobuf::Message;
 use containerd_shim_protos::protobuf::well_known_types::Any;
+use containerd_shim_protos::protobuf::Message;
+use serde::{Deserialize, Serialize};
 
 use crate::api::Options;
 use crate::error::{Error, Result};
@@ -189,13 +189,13 @@ pub fn connect(address: impl AsRef<str>) -> Result<RawFd> {
     // MacOS doesn't support atomic creation of a socket descriptor with `SOCK_CLOEXEC` flag,
     // so there is a chance of leak if fork + exec happens in between of these calls.
     #[cfg(not(target_os = "linux"))]
-        {
-            use nix::fcntl::{fcntl, FcntlArg, FdFlag};
-            fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(|e| {
-                let _ = close(fd);
-                e
-            })?;
-        }
+    {
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+        fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(|e| {
+            let _ = close(fd);
+            e
+        })?;
+    }
 
     connect(fd, &sock_addr).map_err(|e| {
         let _ = close(fd);
@@ -204,7 +204,6 @@ pub fn connect(address: impl AsRef<str>) -> Result<RawFd> {
 
     Ok(fd)
 }
-
 
 pub fn timestamp() -> Result<Timestamp> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?;

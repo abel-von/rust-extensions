@@ -1,15 +1,15 @@
-use std::os::unix::io::RawFd;
-use tokio::task::spawn_blocking;
+use crate::asynchronous::utils::asyncify;
+use crate::error::Result;
+use crate::util::{any, connect, timestamp};
 use async_trait::async_trait;
 use containerd_shim_protos::protobuf::Message;
 use containerd_shim_protos::shim::{empty, events};
 use containerd_shim_protos::shim_async::{Client, Events, EventsClient};
 use containerd_shim_protos::ttrpc;
-use containerd_shim_protos::ttrpc::r#async::TtrpcContext;
 use containerd_shim_protos::ttrpc::context::Context;
-use crate::asynchronous::utils::asyncify;
-use crate::error::Result;
-use crate::util::{any, connect, timestamp};
+use containerd_shim_protos::ttrpc::r#async::TtrpcContext;
+use std::os::unix::io::RawFd;
+use tokio::task::spawn_blocking;
 
 /// Async Remote publisher connects to containerd's TTRPC endpoint to publish events from shim.
 pub struct RemotePublisher {
@@ -33,7 +33,8 @@ impl RemotePublisher {
         let fd = asyncify(move || -> Result<RawFd> {
             let fd = connect(addr)?;
             Ok(fd)
-        }).await?;
+        })
+        .await?;
 
         // Client::new() takes ownership of the RawFd.
         Ok(Client::new(fd))

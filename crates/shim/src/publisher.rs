@@ -16,8 +16,6 @@
 
 //! Implements a client to publish events from the shim back to containerd.
 
-use std::time::{SystemTime, UNIX_EPOCH};
-
 use containerd_shim_protos as client;
 
 use client::protobuf;
@@ -25,7 +23,6 @@ use client::shim::{empty, events};
 use client::ttrpc::{self, context::Context};
 use client::{Client, Events, EventsClient};
 
-use protobuf::well_known_types::{Any, Timestamp};
 use protobuf::Message;
 
 use crate::error::Result;
