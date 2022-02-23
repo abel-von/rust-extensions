@@ -7,7 +7,7 @@ use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::process::Command;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar};
 use std::{env, process};
 
 use crate::asynchronous::monitor::monitor_notify_by_pid;
@@ -29,6 +29,7 @@ use libc::{c_int, pid_t, SIGCHLD, SIGINT, SIGPIPE, SIGTERM};
 use log::{debug, error, info, warn};
 use signal_hook_tokio::Signals;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 
 mod monitor;
 mod publisher;
@@ -246,6 +247,38 @@ pub async fn spawn(opts: StartOpts, grouping: &str, vars: Vec<(&str, &str)>) -> 
             std::mem::forget(listener);
             address
         })
+}
+
+/// Helper structure that wraps atomic bool to signal shim server when to shutdown the TTRPC server.
+///
+/// Shim implementations are responsible for calling [`Self::signal`].
+#[derive(Clone)]
+pub struct ExitSignal(Arc<(Mutex<bool>, Condvar)>);
+
+impl Default for ExitSignal {
+    #[allow(clippy::mutex_atomic)]
+    fn default() -> Self {
+        ExitSignal(Arc::new((Mutex::new(false), Condvar::new())))
+    }
+}
+
+impl ExitSignal {
+    /// Set exit signal to shutdown shim server.
+    pub fn signal(&self) {
+        let (lock, cvar) = &*self.0;
+        let mut exit = lock.lock().unwrap();
+        *exit = true;
+        cvar.notify_all();
+    }
+
+    /// Wait for the exit signal to be set.
+    pub fn wait(&self) {
+        let (lock, cvar) = &*self.0;
+        let mut started = lock.lock().unwrap();
+        while !*started {
+            started = cvar.wait(started).unwrap();
+        }
+    }
 }
 
 fn setup_signals_tokio(config: &Config) -> Signals {

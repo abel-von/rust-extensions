@@ -20,8 +20,16 @@ mod runc;
 mod service;
 mod task;
 
-use crate::service::Service;
+#[cfg(feature = "async")]
+mod asynchronous;
 
+#[cfg(not(feature = "async"))]
 fn main() {
+    containerd_shim::run::<crate::service::Service>("io.containerd.runc.v2", None)
+}
+
+#[cfg(feature = "async")]
+#[tokio::main]
+async fn main() {
     containerd_shim::run::<Service>("io.containerd.runc.v2", None)
 }
